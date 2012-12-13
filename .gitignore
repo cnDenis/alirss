@@ -1,2 +1,3 @@
 ini/*
 export/*
+!"export/!example.ini"
