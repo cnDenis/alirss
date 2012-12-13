@@ -7,6 +7,7 @@ from __future__ import division
 
 import os
 import io
+import re
 import glob
 import time
 import datetime
@@ -61,6 +62,12 @@ class Site():
         self.url = ini.get("SITE", "url")
         self.title = ini.get("SITE", "title")
         self.desc = ini.get("SITE", "description")
+
+        if ini.has_option("SITE", "charset"):
+            self.site_charset = ini.get("SITE", "charset")
+        else:
+            self.site_charset = None
+
         if not self.desc:
             self.desc = self.title
 
@@ -69,10 +76,32 @@ class Site():
         self.rule_item_title = ini.get("RULE", "item_title")
         self.rule_item_link = ini.get("RULE", "item_link")
 
-        if ini.has_option("LINKIN", "filter"):
+        self.linkin = True
+        if ini.has_section("LINKIN"):
+            if ini.has_option("LINKIN", "linkin"):
+                self.linkin = ini.getboolean("LINKIN", "linkin")
+            else:
+                self.linkin = True
+
             self.linkin_filter = ini.get("LINKIN", "filter")
-        else:
-            self.linkin_filter = None
+
+            if ini.has_option("LINKIN", "charset"):
+                self.linkin_charset = ini.get("LINKIN", "charset")
+            else:
+                self.linkin_charset = None
+
+        if not self.linkin_filter:
+                self.linkin_filter = "<body>"
+
+        self.login = False
+        if ini.has_section("LOGIN"):
+            self.login = ini.getboolean("LOGIN", "login")
+            self.login_page = ini.get("LOGIN", "page")
+            self.login_user = ini.get("LOGIN", "user")
+            self.login_pw = ini.get("LOGIN", "password")
+            self.login_form = ini.get("LOGIN", "form")
+            self.login_form_un = ini.get("LOGIN", "form_username")
+
 
         self.xmlfile = os.path.split(ini_file)[-1].rsplit(".", 1)[0] + ".xml"
 
@@ -80,7 +109,24 @@ class Site():
         """解析ini文件中的规则"""
         lgDebug("parsing rule %s", rule)
         for rul in rule.split("|"):
-            if rul[-1] and rul[-1].isdigit():
+            rul = rul.strip()
+
+            if ">:" in rul: # :XX代表取属性，即soup[XX]
+                ru = rul.rsplit(":", 1)[0]
+                field = ":" + rul.rsplit(":", 1)[1]
+            else:
+                field = ""
+
+            if ">." in rul: # .XXX表示取soup.XXX
+                ru = rul.rsplit(".", 1)[0]
+                field = "." + rul.rsplit(".", 1)[1]
+            else:
+                field = ""
+
+            if rul.endswith("*"): # *表示合并所有查找到的项
+                ru = rul.strip("*")
+                index = "*"
+            elif rul[-1] and rul[-1].isdigit(): # 数字表示取指定一项
                 ru, index = rul.rsplit(">", 1)
                 ru = ru + ">"
                 index = int(index)
@@ -92,36 +138,82 @@ class Site():
             lgDebug("parsing subrule %s to %s", ru, r)
             name = r.contents[0].name
             kw = r.contents[0].attrs
-            yield name, kw, index
+            yield name, kw, index, field
 
     def filter(self, soup, rule):
-        """根据规测rule来过滤soup"""
-        for name, kw, index in self.parse_rule(rule):
-            soup = soup(name, **kw)[index]
-        return soup
+        """根据规测rule来过滤soup，获取指定的HTML元素或属性"""
+        for name, kw, index, field in self.parse_rule(rule):
+            if index == "*":
+                st = BeautifulSoup("", "html.parser")
+                for s in soup(name, **kw):
+                    st.append(s)
+                soup = st
+            else:
+                soup = soup(name, **kw)[index]
+
+        if field.startswith(":"):
+            f = field.strip(":")
+            return soup[f]
+        elif field.startswith("."):
+            return getattr(field, f)
+        else:
+            return soup
 
 
     def fetch(self):
         self.read_ini(self.ini_file)
+
+        if self.login:
+            self.do_login()
+
         res = self.session.get(self.url)
 
         self.real_url = res.url
         text = res.text
-        soup = BeautifulSoup(text)
+        if self.site_charset:
+            charset = self.site_charset
+        else:
+            charset = get_charset(text)
+        soup = BeautifulSoup(text, from_encoding=charset)
+        lgDebug("Using page charset: %s", charset)
         self.parse_group(soup)
 
+    def do_login(self):
+        """登录网页"""
+        ln_req = self.session.get(self.login_page)
+        lnsoup = BeautifulSoup(ln_req.text)
+        lnform = self.filter(lnsoup, self.login_form)
+        login_url = abslink(ln_req.url, lnform["action"]) #登录的URLsub
+
+        subdata = {}
+
+        lnformun = self.filter(lnform, self.login_form_un) #用户名框
+        lnformpw = lnform.find("input", type="password") #密码框
+
+        subdata[lnformun["name"]] = self.login_user
+        subdata[lnformpw["name"]] = self.login_pw
+
+        hiddens = lnform("input", type="hidden") #隐藏在form里，要提交的东西
+        for hd in hiddens:
+            subdata[hd["name"]] = hd["value"]
+
+        lgDebug("login data: %s", subdata)
+
+        ln_res = self.session.post(login_url, data=subdata)
+        with io.open(INI_PATH+"/login.htm", "w", encoding="utf-8") as fp:
+            fp.write(ln_res.text)
 
     def parse_group(self, soup):
         """解析一个页面，产生条目信息，装入self.item"""
         group = self.filter(soup, self.rule_group)
 
-        for iname, ikw, iindex in self.parse_rule(self.rule_item):
-            break
+        iname, ikw, iindex, field = self.parse_rule(self.rule_item).next()
 
         items = group(iname, **ikw)
         for i in items:
             it = self.parse_item(i)
             self.items.append(it)
+
 
     def parse_item(self, soup):
         """解析一个条目"""
@@ -136,30 +228,36 @@ class Site():
         else:
             lsoup = soup
 
-        it.title = tsoup.text
+        try:
+            it.title = tsoup.text
+        except AttributeError:
+            it.title = tsoup
         lgDebug("item title: %s" , it.title)
 
-        link = lsoup["href"]
-        if "://" in link:  #判断是否绝对路径
-            it.link = link
-        elif link.startswith("/"):
-            urlp = urlparse.urlparse(self.real_url)
-            it.link = urlp.scheme + "://" + urlp.netloc + link
-        else:
-            it.link = self.real_url.rsplit("/", 1)[0] + "/" + link
+        try:
+            link = lsoup["href"]
+        except KeyError:
+            link = str(lsoup)
+        it.link = abslink(self.real_url, link)
 
         lgDebug("item link: %s" , it.link)
 
-        if self.linkin_filter:
+        if self.linkin:
             lgDebug("Following link: %s", it.link)
 
             lkreq = self.session.get(it.link)
-            lksoup = BeautifulSoup(lkreq.text)
+
+            if self.linkin_charset:
+                charset = self.linkin_charset
+            else:
+                charset = get_charset(lkreq.text)
+            lksoup = BeautifulSoup(lkreq.text, from_encoding=charset)
+            lgDebug("Using charset : %s", charset)
+
             lkcontent = self.filter(lksoup, self.linkin_filter)
-            it.content = unicode(lkcontent)
+            it.content = lkcontent.encode()
 
         return it
-
 
     def write_xml(self, xmlfile=None):
         """输出RSS格式的xml文件"""
@@ -187,6 +285,29 @@ class Site():
             lgDebug("Writing xml file: %s", xml_filename)
             rss.write_xml(fp)
 
+def get_charset(text):
+    """返回网页中的字符集"""
+    try:
+        t = re.search("<meta .*charset\s*=\s*.*>", text).group()
+        ts = re.split("\W", t)
+        i = ts.index("charset")
+        return ts[i+1]
+    except:
+        return None
+
+
+def abslink(ref_url, link):
+    """从网页中的路径生成URL，可以接受相对路径或绝对路径"""
+    if "://" in link:  #判断是否绝对路径
+        abslink = link
+    elif link.startswith("/"):
+        urlp = urlparse.urlparse(ref_url)
+        abslink = urlp.scheme + "://" + urlp.netloc + link
+    else:
+        abslink = ref_url.rsplit("/", 1)[0] + "/" + link
+
+    return abslink
+
 
 
 def default_ini():
@@ -198,6 +319,7 @@ def default_ini():
         ini.set("SITE", "url", "http://www.example.com")
         ini.set("SITE", "title", u"频道的标题".encode("utf8"))
         ini.set("SITE", "description", u"频道的描述".encode("utf8"))
+        ini.set("SITE", "charset", "utf-8")
 
         ini.add_section("RULE")
         ini.set("RULE", "group", "<div>|<p>1")
@@ -206,7 +328,17 @@ def default_ini():
         ini.set("RULE", "item_title", "")
 
         ini.add_section("LINKIN")
+        ini.set("LINKIN", "linkin", True)
         ini.set("LINKIN", "filter", '<div id="main_right">')
+        ini.set("LINKIN", "charset", "utf-8")
+
+        ini.add_section("LOGIN")
+        ini.set("LOGIN", "login", False)
+        ini.set("LOGIN", "page", "http://www.example.com/login")
+        ini.set("LOGIN", "user", "username")
+        ini.set("LOGIN", "password", "password")
+        ini.set("LOGIN", "form", "<form id=XXX>")
+        ini.set("LOGIN", "form_username", "<input id=username>")
 
         with io.open(example_file, "wb") as fp:
             ini.write(fp)
