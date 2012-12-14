@@ -15,6 +15,8 @@ import ConfigParser
 import argparse
 import logging
 import urlparse
+import StringIO
+import chardet
 import requests
 import PyRSS2Gen
 from bs4 import BeautifulSoup
@@ -163,7 +165,7 @@ class Site():
         res = self.session.get(self.url)
 
         self.real_url = res.url
-        text = res.text
+        text = res.content
         if self.site_charset:
             charset = self.site_charset
         else:
@@ -240,18 +242,16 @@ class Site():
             lgDebug("Following link: %s", it.link)
 
             lkreq = self.session.get(it.link)
+            text = lkreq.content
 
             if self.linkin_charset:
                 charset = self.linkin_charset
             else:
-                charset = get_charset(lkreq.text)
+                charset = get_charset(text)
 
             lgDebug("Using charset : %s", charset)
-            text = lkreq.content
-            with io.open(INI_PATH + "/debug.htm", "wb") as fp:
-                fp.write(text)
-            lksoup = BeautifulSoup(text) #, from_encoding=charset)
 
+            lksoup = BeautifulSoup(text, from_encoding=charset)
 
             lkcontent = self.filter(lksoup, self.linkin_filter)
             it.content = unicode(lkcontent)
@@ -285,15 +285,15 @@ class Site():
             lgDebug("Writing xml file: %s", xml_filename)
             rss.write_xml(fp, encoding="utf-8")
 
+    def exit(self):
+        self.session.__exit__()
+
 def get_charset(text):
     """返回网页中的字符集"""
-    try:
-        t = re.search("<meta .*charset\s*=\s*.*>", text).group()
-        ts = re.split("[^a-zA-Z0-9_-]", t)
-        i = ts.index("charset")
-        return ts[i+1]
-    except:
-        return None
+    detector = chardet.detect(text)
+
+    lgDebug("Detected encoding: %s with confidence %f", detector["encoding"], detector["confidence"])
+    return detector["encoding"]
 
 
 def abslink(ref_url, link):
@@ -367,6 +367,7 @@ def read_config(conf_file=None):
         INI_PATH = config.get("PATH", "ini_path")
         EXPORT_PATH = config.get("PATH", "export_path")
         FETCH_INTERVAL = config.getint("FETCH", "interval")
+
     except:
         ch = raw_input("Cannot read %s, generate default?" % CONFIG_FILE)
         if ch.lower().startswith("y"):
@@ -381,6 +382,9 @@ def defautl_config():
     config.add_section("PATH")
     config.set("PATH", "ini_path", "../ini")
     config.set("PATH", "export_path", "../export")
+
+    config.add_section("FETCH")
+    config.set("FETCH", "interval", 1800)
 
     if not CONFIG_FILE:
         CONFIG_FILE = "alirss.conf"
@@ -408,7 +412,11 @@ def fetch_site(ini_file):
         site.fetch()
         site.write_xml()
     except ConfigParser.Error as err:
-        lgError(err)
+        lgError(err, sys.exc_info()[:2])
+    except requests.exceptions.RequestException as err:
+        lgError(err, sys.exc_info()[:2])
+    finally:
+        site.exit()
 
 def fetch_all_site():
     """遍历INI_PATH，抓取其中所有站点"""
