@@ -46,16 +46,20 @@ class item():
 
 class Site():
     """一个频道的信息"""
-    def __init__(self, ini_file=None):
+    def __init__(self):
         self.url = ""
         self.real_url = "" #站点建立连接后的真实URL，有可能会是被重定向过的
         self.session = requests.session() #创建一个session，以keep-Alive，减少连接开销
         self.items = []
-        self.ini_file = ini_file
+        self.linkin = False
+        self.login = False
+        self.xmlfile = ""
 
-    def read_ini(self, ini_file):
+
+    def read_ini(self, ini_file=None):
         """读取一个站点的抓取设置的ini文件"""
-        self.ini_file = ini_file
+        if ini_file:
+            self.ini_file = ini_file
         lgDebug("Reading ini file: %s", ini_file)
         ini = ConfigParser.RawConfigParser()
         ini.readfp(io.open(ini_file, encoding="utf-8"))
@@ -76,24 +80,20 @@ class Site():
         self.rule_item_title = ini.get("RULE", "item_title")
         self.rule_item_link = ini.get("RULE", "item_link")
 
-        self.linkin = True
         if ini.has_section("LINKIN"):
             if ini.has_option("LINKIN", "linkin"):
                 self.linkin = ini.getboolean("LINKIN", "linkin")
-            else:
-                self.linkin = True
 
-            self.linkin_filter = ini.get("LINKIN", "filter")
+            if ini.has_option("LINKIN", "filter"):
+                self.linkin_filter = ini.get("LINKIN", "filter")
+            else:
+                self.linkin_filter = "<body>"
 
             if ini.has_option("LINKIN", "charset"):
                 self.linkin_charset = ini.get("LINKIN", "charset")
             else:
                 self.linkin_charset = None
 
-        if not self.linkin_filter:
-                self.linkin_filter = "<body>"
-
-        self.login = False
         if ini.has_section("LOGIN"):
             self.login = ini.getboolean("LOGIN", "login")
             self.login_page = ini.get("LOGIN", "page")
@@ -101,7 +101,6 @@ class Site():
             self.login_pw = ini.get("LOGIN", "password")
             self.login_form = ini.get("LOGIN", "form")
             self.login_form_un = ini.get("LOGIN", "form_username")
-
 
         self.xmlfile = os.path.split(ini_file)[-1].rsplit(".", 1)[0] + ".xml"
 
@@ -112,33 +111,30 @@ class Site():
             rul = rul.strip()
 
             if ">:" in rul: # :XX代表取属性，即soup[XX]
-                ru = rul.rsplit(":", 1)[0]
-                field = ":" + rul.rsplit(":", 1)[1]
-            else:
-                field = ""
-
-            if ">." in rul: # .XXX表示取soup.XXX
-                ru = rul.rsplit(".", 1)[0]
-                field = "." + rul.rsplit(".", 1)[1]
+                rul, field = rul.rsplit(":", 1)
+                field = ":" + field
+            elif ">." in rul: # .XXX表示取soup.XXX
+                rul, field = rul.rsplit(".", 1)[0]
+                field = "." + field
             else:
                 field = ""
 
             if rul.endswith("*"): # *表示合并所有查找到的项
-                ru = rul.strip("*")
+                rul = rul.strip("*")
                 index = "*"
             elif rul[-1] and rul[-1].isdigit(): # 数字表示取指定一项
-                ru, index = rul.rsplit(">", 1)
-                ru = ru + ">"
+                rul, index = rul.rsplit(">", 1)
+                rul = rul + ">"
                 index = int(index)
             else:
-                ru = rul
                 index = 0
 
-            r = BeautifulSoup(ru, "html.parser")
-            lgDebug("parsing subrule %s to %s", ru, r)
+            r = BeautifulSoup(rul, "html.parser")
+            lgDebug("parsing subrule %s to %s", rul, r)
             name = r.contents[0].name
             kw = r.contents[0].attrs
             yield name, kw, index, field
+
 
     def filter(self, soup, rule):
         """根据规测rule来过滤soup，获取指定的HTML元素或属性"""
@@ -161,8 +157,6 @@ class Site():
 
 
     def fetch(self):
-        self.read_ini(self.ini_file)
-
         if self.login:
             self.do_login()
 
@@ -251,11 +245,17 @@ class Site():
                 charset = self.linkin_charset
             else:
                 charset = get_charset(lkreq.text)
-            lksoup = BeautifulSoup(lkreq.text, from_encoding=charset)
+
             lgDebug("Using charset : %s", charset)
+            text = lkreq.content
+            with io.open(INI_PATH + "/debug.htm", "wb") as fp:
+                fp.write(text)
+            lksoup = BeautifulSoup(text) #, from_encoding=charset)
+
 
             lkcontent = self.filter(lksoup, self.linkin_filter)
-            it.content = lkcontent.encode()
+            it.content = unicode(lkcontent)
+
 
         return it
 
@@ -283,13 +283,13 @@ class Site():
 
         with open(xml_filename, "w") as fp:
             lgDebug("Writing xml file: %s", xml_filename)
-            rss.write_xml(fp)
+            rss.write_xml(fp, encoding="utf-8")
 
 def get_charset(text):
     """返回网页中的字符集"""
     try:
         t = re.search("<meta .*charset\s*=\s*.*>", text).group()
-        ts = re.split("\W", t)
+        ts = re.split("[^a-zA-Z0-9_-]", t)
         i = ts.index("charset")
         return ts[i+1]
     except:
@@ -307,7 +307,6 @@ def abslink(ref_url, link):
         abslink = ref_url.rsplit("/", 1)[0] + "/" + link
 
     return abslink
-
 
 
 def default_ini():
@@ -404,7 +403,8 @@ def fetch_site(ini_file):
         return
 
     try:
-        site = Site(fn)
+        site = Site()
+        site.read_ini(fn)
         site.fetch()
         site.write_xml()
     except ConfigParser.Error as err:
