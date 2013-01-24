@@ -17,7 +17,6 @@ import ConfigParser
 import argparse
 import logging
 import urlparse
-#import StringIO
 import chardet
 import requests
 import PyRSS2Gen
@@ -56,14 +55,6 @@ class AliError(Exception):
         exc_type, exc_value, exc_traceback = sys.exc_info()
         lgError('%s.  File "%s" Line %s in <%s>\n    %s', self.message, *(traceback.extract_tb(exc_traceback)[0]))
 
-class RuleError(AliError):
-    pass
-
-class RuleParseError(RuleError):
-    pass
-
-class RuleFilterError(RuleError):
-    pass
 
 class Item(object):
     """RSS频道中的一个条目所的内容"""
@@ -85,7 +76,7 @@ class Page(object):
         self._rawtext = None
         self._soup = None
         self._tree = None
-        self.next_page = None
+
 
     @property
     def rawtext(self):
@@ -143,6 +134,7 @@ class Page(object):
 
 
     def xpath(self, xpath):
+        """按xpath查找页面中的内容"""
         return self.tree.xpath(xpath)
 
 
@@ -150,19 +142,8 @@ class Page(object):
         return self.xpath(rule)
 
 
-    def linkin(self, rule):
-        link = self.get_by_rule(rule)
-
-        link = abslink(self.real_url, link)
-
-        lgDebug("Folling link: %s", link)
-
-        np = Page(url=link, session=self.session, charset=self.charset)
-
-        return np
-
-
     def form_submit(self, form, data):
+        """获取form的提交地址、提交方法、hidden内容，与data一起提交，返回提交后的页面"""
         lnform = self.get_by_rule(form)[0]
         sub_url = abslink(self.real_url, lnform.get("action")) #登录的URLsub
         sub_method = lnform.get("method", "GET")  # GET是form标签中method属性的默认值
@@ -469,8 +450,7 @@ def default_ini():
         ini.set("SITE", "linkin", True)
 
         ini.add_section("RULE")
-        ini.set("RULE", "group", "//div/p[1]")
-        ini.set("RULE", "item", "./a")
+        ini.set("RULE", "item", "//p/a")
         ini.set("RULE", "item_link", "")
         ini.set("RULE", "item_title", "")
 
