@@ -13,10 +13,12 @@ import glob
 import time
 import types
 import datetime
+import traceback
 import ConfigParser
 import argparse
 import logging
 import urlparse
+
 import chardet
 import requests
 import PyRSS2Gen
@@ -24,20 +26,19 @@ import lxml
 import lxml.html
 from bs4 import BeautifulSoup
 
-import traceback
+import gitpub
 
-
-
-ROOT_PATH = ""
 INI_PATH = ""
 EXPORT_PATH = ""
 CONFIG_FILE = ""
+REPO_NAME = ""
 FETCH_INTERVAL = 1800 #抓取间隔
 DEBUG_MODE = True
 
+
 if DEBUG_MODE:
     LOG_LEVEL = logging.DEBUG
-    DEBUG_PATH = os.path.join(ROOT_PATH, "../debug")
+    DEBUG_PATH = "../debug"
 else:
     LOG_LEVEL = logging.INFO
 
@@ -48,6 +49,8 @@ lgInfo = logging.info
 lgWarning = logging.warning
 lgError = logging.error
 lgCritical = logging.critical
+
+lgDebug("alirss started!")
 
 class AliError(Exception):
     def __init__(self, *arg, **kw):
@@ -475,13 +478,17 @@ def read_config(conf_file=None):
     global EXPORT_PATH
     global CONFIG_FILE
     global FETCH_INTERVAL
+    global REPO_NAME
     ROOT_PATH = os.path.split(os.path.realpath(__file__))[0]
 
     if not conf_file:
         CONFIG_FILE = "alirss.conf"
+    else:
+        CONFIG_FILE = conf_file
 
     if not os.path.isfile(CONFIG_FILE):
-        defautl_config()
+        lgInfo("CONFIG_FILE not exists: %s", CONFIG_FILE)
+        default_config()
 
     try:
         config = ConfigParser.RawConfigParser()
@@ -492,15 +499,35 @@ def read_config(conf_file=None):
         INI_PATH = config.get("PATH", "ini_path")
         EXPORT_PATH = config.get("PATH", "export_path")
         FETCH_INTERVAL = config.getint("FETCH", "interval")
+        try:
+            if config.getboolean("PUBLICATION", "public"):
+                REPO_NAME = config.get("PUBLICATION", "reponame")
+        except Exception:
+            pass
 
-    except:
+    except Exception:
         ch = raw_input("Cannot read %s, generate default?" % CONFIG_FILE)
         if ch.lower().startswith("y"):
             defautl_config()
             print("Default config file, please restart program")
 
+def print_config():
 
-def defautl_config():
+    conf = u"""\n
+************************************************
+    CONFIG_FILE =       {cff}
+    INI_PATH =          {ini}
+    EXPORT_PATH =       {exp}
+    FETCH_INTERVAL =    {fet}
+    REPO_NAME =         {isp}
+************************************************
+    """.format(cff=CONFIG_FILE, ini=INI_PATH, exp=EXPORT_PATH, fet=FETCH_INTERVAL,
+            isp=REPO_NAME).encode("gbk")
+    lgInfo(conf)
+
+
+
+def default_config():
     """生成默认全局配置文件"""
     global CONFIG_FILE
     config = ConfigParser.RawConfigParser()
@@ -510,6 +537,12 @@ def defautl_config():
 
     config.add_section("FETCH")
     config.set("FETCH", "interval", 1800)
+
+    config.add_section("PUBLICATION")
+    config.set("PUBLICATION", "public", False)
+    config.set("PUBLICATION", "repo", "")
+#    config.set("PUBLICATION", "username", "")
+#    config.set("PUBLICATION", "password", "")
 
     if not CONFIG_FILE:
         CONFIG_FILE = "alirss.conf"
@@ -552,6 +585,18 @@ def fetch_all_site():
         else:
             fetch_site(fn)
 
+def public():
+    cwd = os.getcwd()
+    os.chdir(EXPORT_PATH)
+    lgInfo("pushing to %s", REPO_NAME)
+
+    os.system("git add .")
+    os.system('git commit -a -m "upload by alirss at %s"' % time.asctime())
+    os.system("git push -u %s" % REPO_NAME)
+
+    os.chdir(cwd)
+
+
 def main():
     """程序入口"""
     argp = argparse.ArgumentParser(description="A local Page to RSS generator")
@@ -560,8 +605,15 @@ def main():
     args = argp.parse_args()
     lgDebug("Arguments: %s", args)
 
-    read_config(args.conf)
+    try:
+        conf = args.conf[0]
+        lgDebug("conf = %s", conf)
+    except Exception:
+        conf = None
+
+    read_config(conf)
     default_ini()
+    print_config()
 
     if args.test:
         lgInfo("Running test: %s", args.test)
@@ -574,6 +626,8 @@ def main():
         while True:
             lgInfo("Start fretch all site")
             fetch_all_site()
+            if REPO_NAME:
+                public()
             lgInfo("Fetch done, wait %ss", FETCH_INTERVAL)
             time.sleep(FETCH_INTERVAL)
 
