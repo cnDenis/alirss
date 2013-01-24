@@ -13,28 +13,32 @@ import glob
 import time
 import types
 import datetime
+import traceback
 import ConfigParser
 import argparse
 import logging
 import urlparse
-import StringIO
+
 import chardet
 import requests
 import PyRSS2Gen
+import lxml
+import lxml.html
 from bs4 import BeautifulSoup
 
-import traceback
+import gitpub
 
-ROOT_PATH = ""
 INI_PATH = ""
 EXPORT_PATH = ""
 CONFIG_FILE = ""
+REPO_NAME = ""
 FETCH_INTERVAL = 1800 #抓取间隔
 DEBUG_MODE = True
 
+
 if DEBUG_MODE:
     LOG_LEVEL = logging.DEBUG
-    DEBUG_PATH = os.path.join(ROOT_PATH, "../debug")
+    DEBUG_PATH = "../debug"
 else:
     LOG_LEVEL = logging.INFO
 
@@ -46,20 +50,14 @@ lgWarning = logging.warning
 lgError = logging.error
 lgCritical = logging.critical
 
+lgDebug("alirss started!")
+
 class AliError(Exception):
     def __init__(self, *arg, **kw):
         Exception.__init__(self, *arg, **kw)
         exc_type, exc_value, exc_traceback = sys.exc_info()
         lgError('%s.  File "%s" Line %s in <%s>\n    %s', self.message, *(traceback.extract_tb(exc_traceback)[0]))
 
-class RuleError(AliError):
-    pass
-
-class RuleParseError(RuleError):
-    pass
-
-class RuleFilterError(RuleError):
-    pass
 
 class Item(object):
     """RSS频道中的一个条目所的内容"""
@@ -73,16 +71,56 @@ class Page(object):
     """抓取回来的一个页面"""
     def __init__(self, url, session=None, charset=None, method="GET", sub_data=None):
         self.url = url
-        self.real_url = ""
+        self._real_url = None
         self.session = session
-        self.charset = charset
+        self._charset = charset
         self.sub_data = sub_data
         self.method = method
-        self.rawtext = ""
-        self.soup = None
-        self.next_page = None
+        self._rawtext = None
+        self._soup = None
+        self._tree = None
+
+
+    @property
+    def rawtext(self):
+        """返回页面的内容（bytes，未解码）"""
+        if not self._rawtext:
+            self.fetch()
+        return self._rawtext
+
+    @property
+    def real_url(self):
+        """返回页面的真实URL，可能是跳转之后的结果"""
+        if not self._real_url:
+            self.fetch()
+        return self._real_url
+
+    @property
+    def charset(self):
+        """返回页面的字符集，用chardet检测"""
+        if not self._charset:
+            self._charset = get_charset(self.rawtext)
+            lgDebug("page charset: %s", self._charset)
+        return self._charset
+
+    @property
+    def soup(self):
+        """返回页面的beautifulsoup解析得到的soup"""
+        if not self._soup:
+            self._soup = BeautifulSoup(self.rawtext, from_encoding=self.charset)
+        return self._soup
+
+    @property
+    def tree(self):
+        """返回页面用lxml解析得到的etree"""
+        if not self._tree:
+            parser = lxml.etree.HTMLParser(encoding=self.charset)
+            self._tree = lxml.html.fromstring(self.rawtext, parser=parser, base_url=self.real_url)
+        return self._tree
+
 
     def fetch(self):
+        """抓取页面"""
         if not self.session:
             self.session = requests.session()
 
@@ -94,48 +132,42 @@ class Page(object):
         else:
             req = self.session.get(self.url, params=self.sub_data)
 
-        self.rawtext = req.content
-        self.real_url = req.url
-        if not self.charset:
-            charset = chardet.detect(self.rawtext)
-        else:
-            charset = self.charset
-        self.soup = BeautifulSoup(self.rawtext)
+        self._rawtext = req.content
+        self._real_url = req.url
 
-    def linkin(self, rule):
-        lnsoup = rule_filter(self.soup, rule)
-        try:
-            link = lnsoup["href"]
-        except KeyError:
-            link = lnsoup
-        link = abslink(self.real_url, link)
 
-        lgDebug("Folling link: %s", link)
+    def xpath(self, xpath):
+        """按xpath查找页面中的内容"""
+        return self.tree.xpath(xpath)
 
-        np = Page(url=link, session=self.session, charset=self.charset)
-        np.fetch()
-        self.next_page = np
+
+    def get_by_rule(self, rule):
+        return self.xpath(rule)
+
 
     def form_submit(self, form, data):
-        lnform = rule_filter(self.soup, form)
-        sub_url = abslink(self.real_url, lnform["action"]) #登录的URLsub
-        try:
-            sub_method = lnform["method"]
-        except KeyError:
-            sub_method = "GET" # GET是form标签中method属性的默认值
-
+        """获取form的提交地址、提交方法、hidden内容，与data一起提交，返回提交后的页面"""
+        lnform = self.get_by_rule(form)[0]
+        sub_url = abslink(self.real_url, lnform.get("action")) #登录的URLsub
+        sub_method = lnform.get("method", "GET")  # GET是form标签中method属性的默认值
         sub_data = data
 
-        hiddens = lnform("input", type="hidden") #隐藏在form里，要提交的东西
+        hiddens = lnform.xpath(".//input[@type='hidden']") #隐藏在form里，要提交的东西
         for hd in hiddens:
-            sub_data[hd["name"]] = hd["value"]
+            sub_data[hd.get("name")] = hd.get("value", "")
 
         lgDebug("submit to %s", sub_url)
         lgDebug("submit data: %s", sub_data)
 
         np = Page(url=sub_url, session=self.session, charset=self.charset, method=sub_method, sub_data=data)
         np.fetch()
-        self.next_page = np
+        return np
+
+
+class Tag(lxml.html.HtmlElement):
+    def get_by_rule(self, rule):
+        return self.xpath(rule)
+
 
 
 class Site(object):
@@ -187,7 +219,6 @@ class Site(object):
                 self.login = False
 
             #读[RULE]段
-            self.rule_group = ini.get("RULE", "group")
             self.rule_item = ini.get("RULE", "item")
             self.rule_item_title = ini.get("RULE", "item_title")
             self.rule_item_link = ini.get("RULE", "item_link")
@@ -240,22 +271,12 @@ class Site(object):
 
         self.get_old_items()
         for self.url in self.urls:
-            res = self.session.get(self.url)
-
-            self.real_url = res.url
-            text = res.content
-            if self.site_charset:
-                charset = self.site_charset
-            else:
-                charset = get_charset(text)
-            lgDebug("Using page charset: %s", charset)
-
-            soup = BeautifulSoup(text, from_encoding=charset)
+            pg = Page(self.url, session=self.session, charset=self.site_charset)
             if DEBUG_MODE:
                 with open(DEBUG_PATH + "/site.htm", "wb") as fp:
-                    fp.write(soup.prettify("utf-8"))
+                    fp.write(pg.rawtext)
 
-            self.parse_group(soup)
+            self.parse_page(pg)
 
         if self.linkin:
             self.do_linkin_all()
@@ -264,55 +285,63 @@ class Site(object):
     def do_login(self):
         """登录网页"""
         ln_page = Page(self.login_url, session=self.session)
-        ln_page.fetch()
-        ln_page.form_submit(form=self.login_form, data=self.login_data)
-        self.pages["login"] = ln_page.next_page
+        self.pages["login"] = ln_page.form_submit(form=self.login_form, data=self.login_data)
+
         if DEBUG_MODE:
             with open(DEBUG_PATH + "/login.htm", "wb") as fp:
                 fp.write(ln_page.rawtext)
             with open(DEBUG_PATH + "/login_done.htm", "wb") as fp:
-                fp.write(ln_page.next_page.rawtext)
+                fp.write(self.pages["login"].rawtext)
 #TODO: 本地密码加密
 
 
-    def parse_group(self, soup):
+    def parse_page(self, page):
         """解析一个页面，产生条目信息，装入self.items"""
-        group = rule_filter(soup, self.rule_group)
+        self.real_url = page.real_url
+        self.charset = page.charset
+        items = page.get_by_rule(self.rule_item)
 
         if DEBUG_MODE:
             with open(DEBUG_PATH + "/group.soup", "wb") as fp:
-                fp.write(group.prettify("utf-8"))
+                for gp in items:
+                    fp.write(lxml.etree.tostring(gp, encoding="utf-8"))
 
-        iname, ikw, iindex, field = rule_parse(self.rule_item).next()
-
-        itemsoups = group(iname, **ikw)
-        for i in itemsoups:
+        for i in items:
             it = self.parse_item(i)
             self.items.append(it)
 
 
-    def parse_item(self, soup):
+    def parse_item(self, tag):
         """解析一个条目，获取名字和链接"""
+        lgDebug("tag is %s", tag)
+        lgDebug("tag is %s", lxml.etree.tostring(tag, encoding="utf-8"))
         it = Item()
         if self.rule_item_title:
-            tsoup = rule_filter(soup, self.rule_item_title)
+            tsoup = tag.xpath(self.rule_item_title)
+            if isinstance(tsoup, list):
+                tsoup = tsoup[0]
         else:
-            tsoup = soup
+            tsoup = tag
+        lgDebug("tsoup is %s", tsoup)
 
         if self.rule_item_link:
-            lsoup = rule_filter(soup, self.rule_item_link)
+            lsoup = tag.xpath(self.rule_item_link)
+            if isinstance(lsoup, list):
+                lsoup = lsoup[0]
         else:
-            lsoup = soup
+            lsoup = tag
+        lgDebug("lsoup is %s", lsoup)
 
         try:
-            it.title = tsoup.text
-        except AttributeError: #如果it.title是字符串，则会报AttributeError
-            it.title = tsoup
+            it.title = u"".join(tsoup.itertext())
+        except Exception as err: #如果it.title是字符串，则会报AttributeError
+            lgDebug("text_content exception: %s", err)
+            it.title = unicode(tsoup)
         lgDebug("item title: %s" , it.title)
 
         try:
-            link = lsoup["href"]
-        except TypeError: #如果it.title是字符串，则会报TypeError
+            link = lsoup.get("href")
+        except Exception: #如果it.title是字符串，则会报TypeError
             link = unicode(lsoup)
         it.link = abslink(self.real_url, link)
         lgDebug("item link: %s" , it.link)
@@ -332,10 +361,10 @@ class Site(object):
             try:
                 lgDebug("Following new item link: %s", it.link)
                 pg = Page(url=it.link, session=self.session, charset=self.linkin_charset)
-                pg.fetch()
-                lksoup = pg.soup
-                lkcontent = rule_filter(lksoup, self.linkin_content)
-                it.content = unicode(lkcontent)
+                lkcontent = pg.get_by_rule(self.linkin_content)
+                cdata = u"".join([lxml.etree.tostring(t, encoding=unicode) for t in lkcontent])
+                cdata.replace("]]>", ">")
+                it.content = u"<![CDATA[%s]]>" % cdata
             except requests.exceptions.RequestException as err: #网页中坏链接是常有的事，在这里就处理掉
                 lgWarning("requests error: %s", err)
                 lgWarning("Error while following link %s.", it.link)
@@ -386,89 +415,15 @@ class Site(object):
         self.session.__exit__()
 
 
-def rule_parse(rule):
-    """解析ini文件中的规则"""
-    lgDebug("parsing rule %s", rule)
-    for rul in rule.split("|"):
-        try:
-            rul_ori = rul
-            rul = rul.strip()
-            if ">:" in rul: # :XX代表取属性，即soup[XX]
-                rul, field = rul.rsplit(":", 1)
-                field = ":" + field
-            elif ">." in rul: # .XXX表示取soup.XXX
-                rul, field = rul.rsplit(".", 1)
-                field = "." + field
-            else:
-                field = ""
-
-            if rul.endswith("*"): # *表示合并所有查找到的项
-                rul = rul.strip("*")
-                index = "*"
-            elif rul[-1] and rul[-1].isdigit(): # 数字表示取指定一项或几项
-                rul, index = rul.rsplit(">", 1)
-                rul = rul + ">"
-                indexs = []
-                for ind in index.split(","):
-                    if "-" in ind:
-                        i1, i2 = ind.split("-", 1)
-                        i1 = int(i1)
-                        i2 = int(i2)+1
-                        indexs.extend(xrange(i1, i2))
-                    else:
-                        indexs.append(int(ind))
-                index = indexs
-            else:
-                index = 0
-
-            r = BeautifulSoup(rul, "html.parser")
-            name = r.contents[0].name
-            kw = r.contents[0].attrs
-            lgDebug("parsing subrule %s to %s, yield (%s, %s, %s, %s)", rul, r, name, kw, index, field)
-            yield name, kw, index, field
-        except LookupError as err:
-            lgError("Rule parse error on %s :%s", rul_ori, err)
-            raise RuleParseError(err)
-
-def rule_filter(soup, rule):
-    """根据规测rule来过滤soup，获取指定的HTML元素或属性"""
-    try:
-        for name, kw, index, field in rule_parse(rule):
-            if index == "*":
-                st = BeautifulSoup("", "html.parser")
-                for s in soup(name, **kw):
-                    st.append(s)
-                soup = st
-            elif isinstance(index, types.ListType):
-                st = BeautifulSoup("", "html.parser")
-                sp = soup(name, **kw)
-                for i in index:
-                    st.append(sp[i])
-                soup = st
-            else:
-                soup = soup(name, **kw)[index]
-
-        if field.startswith(":"):
-            f = field.strip(":")
-            return soup[f]
-        elif field.startswith("."):
-            f = field.strip(".")
-            return getattr(soup, f)
-        else:
-            return soup
-    except RuleParseError as err:
-        raise err
-    except StandardError as err:
-        lgError("Rule filter error, %s", err)
-        raise RuleFilterError(err)
-
-
 def get_charset(text):
     """返回网页中的字符集"""
     detector = chardet.detect(text)
 
     lgDebug("Detected encoding: %s with confidence %f", detector["encoding"], detector["confidence"])
-    return detector["encoding"]
+    if detector["encoding"].lower().startswith("gb"):
+        return("gbk")
+    else:
+        return detector["encoding"]
 
 
 def abslink(ref_url, link):
@@ -498,20 +453,19 @@ def default_ini():
         ini.set("SITE", "linkin", True)
 
         ini.add_section("RULE")
-        ini.set("RULE", "group", "<div>|<p>1")
-        ini.set("RULE", "item", "<a>")
+        ini.set("RULE", "item", "//p/a")
         ini.set("RULE", "item_link", "")
         ini.set("RULE", "item_title", "")
 
         ini.add_section("LINKIN")
-        ini.set("LINKIN", "content", '<div id="main_right">')
+        ini.set("LINKIN", "content", '//div[@id="main_right"]')
         ini.set("LINKIN", "charset", "")
 
         ini.add_section("LOGIN")
         ini.set("LOGIN", "url", "http://www.example.com/login")
         ini.set("LOGIN", "user", "username:your_username")
         ini.set("LOGIN", "password", "password:your_password")
-        ini.set("LOGIN", "form", "<form id=XXX>")
+        ini.set("LOGIN", "form", "//form[@id=XXX]")
 
         with io.open(example_file, "wb") as fp:
             ini.write(fp)
@@ -524,13 +478,17 @@ def read_config(conf_file=None):
     global EXPORT_PATH
     global CONFIG_FILE
     global FETCH_INTERVAL
+    global REPO_NAME
     ROOT_PATH = os.path.split(os.path.realpath(__file__))[0]
 
     if not conf_file:
         CONFIG_FILE = "alirss.conf"
+    else:
+        CONFIG_FILE = conf_file
 
     if not os.path.isfile(CONFIG_FILE):
-        defautl_config()
+        lgInfo("CONFIG_FILE not exists: %s", CONFIG_FILE)
+        default_config()
 
     try:
         config = ConfigParser.RawConfigParser()
@@ -541,15 +499,35 @@ def read_config(conf_file=None):
         INI_PATH = config.get("PATH", "ini_path")
         EXPORT_PATH = config.get("PATH", "export_path")
         FETCH_INTERVAL = config.getint("FETCH", "interval")
+        try:
+            if config.getboolean("PUBLICATION", "public"):
+                REPO_NAME = config.get("PUBLICATION", "reponame")
+        except Exception:
+            pass
 
-    except:
+    except Exception:
         ch = raw_input("Cannot read %s, generate default?" % CONFIG_FILE)
         if ch.lower().startswith("y"):
             defautl_config()
             print("Default config file, please restart program")
 
+def print_config():
 
-def defautl_config():
+    conf = u"""\n
+************************************************
+    CONFIG_FILE =       {cff}
+    INI_PATH =          {ini}
+    EXPORT_PATH =       {exp}
+    FETCH_INTERVAL =    {fet}
+    REPO_NAME =         {isp}
+************************************************
+    """.format(cff=CONFIG_FILE, ini=INI_PATH, exp=EXPORT_PATH, fet=FETCH_INTERVAL,
+            isp=REPO_NAME).encode("gbk")
+    lgInfo(conf)
+
+
+
+def default_config():
     """生成默认全局配置文件"""
     global CONFIG_FILE
     config = ConfigParser.RawConfigParser()
@@ -559,6 +537,12 @@ def defautl_config():
 
     config.add_section("FETCH")
     config.set("FETCH", "interval", 1800)
+
+    config.add_section("PUBLICATION")
+    config.set("PUBLICATION", "public", False)
+    config.set("PUBLICATION", "repo", "")
+#    config.set("PUBLICATION", "username", "")
+#    config.set("PUBLICATION", "password", "")
 
     if not CONFIG_FILE:
         CONFIG_FILE = "alirss.conf"
@@ -601,6 +585,18 @@ def fetch_all_site():
         else:
             fetch_site(fn)
 
+def public():
+    cwd = os.getcwd()
+    os.chdir(EXPORT_PATH)
+    lgInfo("pushing to %s", REPO_NAME)
+
+    os.system("git add .")
+    os.system('git commit -a -m "upload by alirss at %s"' % time.asctime())
+    os.system("git push -u %s" % REPO_NAME)
+
+    os.chdir(cwd)
+
+
 def main():
     """程序入口"""
     argp = argparse.ArgumentParser(description="A local Page to RSS generator")
@@ -609,8 +605,15 @@ def main():
     args = argp.parse_args()
     lgDebug("Arguments: %s", args)
 
-    read_config(args.conf)
+    try:
+        conf = args.conf[0]
+        lgDebug("conf = %s", conf)
+    except Exception:
+        conf = None
+
+    read_config(conf)
     default_ini()
+    print_config()
 
     if args.test:
         lgInfo("Running test: %s", args.test)
@@ -623,6 +626,8 @@ def main():
         while True:
             lgInfo("Start fretch all site")
             fetch_all_site()
+            if REPO_NAME:
+                public()
             lgInfo("Fetch done, wait %ss", FETCH_INTERVAL)
             time.sleep(FETCH_INTERVAL)
 
