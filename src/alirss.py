@@ -1,5 +1,5 @@
 #! /usr/bin/env python
-#coding=utf-8
+# coding=utf-8
 # by cnDenis <cndenis@gmail.com>
 
 from __future__ import print_function
@@ -33,25 +33,18 @@ CONFIG_FILE = ""
 REPO_NAME = ""
 MAX_CONTENT_LEN = 30000
 FETCH_INTERVAL = 1800  # 抓取间隔
-DEBUG_MODE = True
+DEBUG_MODE = False
+DEBUG_PATH = "../debug"
 
+PAGE_COUNT = 0  # 新发现的页面数
 
-if DEBUG_MODE:
-    LOG_LEVEL = logging.DEBUG
-    DEBUG_PATH = "../debug"
-else:
-    LOG_LEVEL = logging.INFO
-
-#Log设置
-logging.basicConfig(
-    format='%(asctime)s - %(levelname)s - %(message)s', level=LOG_LEVEL)
+# Log设置
+logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s")
 lgDebug = logging.debug
 lgInfo = logging.info
 lgWarning = logging.warning
 lgError = logging.error
 lgCritical = logging.critical
-
-lgDebug("alirss started!")
 
 
 class AliError(Exception):
@@ -185,13 +178,14 @@ class Site(object):
         self.login = False
         self.xmlfile = ""
         self.pages = {}  # 装载一些进入过的页面
+        self.new_page_count = 0
         self.cleaner = lxml.html.clean.Cleaner(scripts=False, style=False, links=False,
                                                javascript=False, comments=False, annoying_tags=False,
                                                meta=False, page_structure=False, frames=False,
                                                remove_unknown_tags=True, safe_attrs_only=True,
                                                remove_tags=["span"])
-#TODO: 对网页大小的限制
-#TODO: 对资源使用的限制
+# TODO: 对网页大小的限制
+# TODO: 对资源使用的限制
 
     def read_ini(self, ini_file=None):
         """读取一个站点的抓取设置的ini文件"""
@@ -265,13 +259,14 @@ class Site(object):
             lgError("ini file error, %s", err)
             raise err
 
-#TODO:linkn的设定
-#TODO:user_agent支持
+# TODO:linkn的设定
+# TODO:user_agent支持
         xmlfile = os.path.split(ini_file)[-1].rsplit(".", 1)[0] + ".xml"
         self.xmlfile = os.path.join(EXPORT_PATH, xmlfile)
 
     def fetch(self):
         """抓取站点"""
+        self.new_page_count = 0
         if self.login:
             self.do_login()
 
@@ -299,7 +294,7 @@ class Site(object):
                 fp.write(ln_page.rawtext)
             with open(DEBUG_PATH + "/login_done.htm", "wb") as fp:
                 fp.write(self.pages["login"].rawtext)
-#TODO: 本地密码加密
+# TODO: 本地密码加密
 
     def parse_page(self, page):
         """解析一个页面，产生条目信息，装入self.items"""
@@ -308,7 +303,7 @@ class Site(object):
         items = page.get_by_rule(self.rule_item)
 
         if DEBUG_MODE:
-            with open(DEBUG_PATH + "/group.soup", "wb") as fp:
+            with open(DEBUG_PATH + "/group.html", "wb") as fp:
                 for gp in items:
                     fp.write(lxml.etree.tostring(gp, encoding="utf-8"))
 
@@ -349,7 +344,13 @@ class Site(object):
         except Exception:  # 如果it.title是字符串，则会报TypeError
             link = unicode(lsoup)
         it.link = abslink(self.real_url, link)
-        lgDebug("item link: %s", it.link)
+
+        # 判断是否已存在
+        guid = unicode(it.link)
+        if guid not in self.old_items:
+            self.new_page_count += 1
+            lgDebug("New item link: %s", it.link)
+
         return it
 
     def do_linkin_all(self, refresh=False):
@@ -377,8 +378,10 @@ class Site(object):
                         cdata = u"".join(re.findall(r"<.*>", cdata[:MAX_CONTENT_LEN]))
                     else:
                         cdata = cdata[:MAX_CONTENT_LEN]
-                    cdata = cdata + u"<a href='%s'>...阅读全文</a>" % it.link
-                it.content = u"<![CDATA[%s]]>" % cdata
+                    cdata = cdata + (u"<a href='%s'><span style='font-size:150%%'>...阅读全文</span></a>" % it.link)
+                    lgDebug("length > 30000 %s", cdata[-100:])
+                # cdata = u"<![CDATA[%s]]>" % cdata
+                it.content = cdata
             except requests.exceptions.RequestException as err:  # 网页中坏链接是常有的事，在这里就处理掉
                 lgWarning("requests error: %s", err)
                 lgWarning("Error while following link %s.", it.link)
@@ -530,6 +533,10 @@ def read_config(conf_file=None):
 
 def print_config():
 
+    logger = logging.getLogger()
+    lvl = logger.getEffectiveLevel()
+    lvln = logging.getLevelName(lvl)
+
     conf = u"""\n
 ************************************************
     CONFIG_FILE =       {cff}
@@ -537,9 +544,11 @@ def print_config():
     EXPORT_PATH =       {exp}
     FETCH_INTERVAL =    {fet}
     REPO_NAME =         {isp}
+
+    logging_level =     {lvln}
 ************************************************
     """.format(cff=CONFIG_FILE, ini=INI_PATH, exp=EXPORT_PATH, fet=FETCH_INTERVAL,
-               isp=REPO_NAME).encode("gbk")
+               isp=REPO_NAME, lvln=lvln).encode("gbk")
     lgInfo(conf)
 
 
@@ -575,17 +584,26 @@ def fetch_site(ini_file):
         fn = fn + ".ini"
 
     if not os.path.isfile(fn):
-        fn = os.path.join(INI_PATH, fn)
+        fullfn = os.path.join(INI_PATH, fn)
+    else:
+        fullfn = fn
 
-    if not os.path.isfile(fn):
+    if not os.path.isfile(fullfn):
         lgError("ini file not found: %s", ini_file)
         return
 
     try:
         site = Site()
-        site.read_ini(fn)
+        site.read_ini(fullfn)
         site.fetch()
-        site.write_xml()
+        npc = site.new_page_count
+        if npc > 0:
+            global PAGE_COUNT
+            PAGE_COUNT += npc
+            lgInfo("Site %s found %s new items", fn, npc)
+            site.write_xml()
+        else:
+            lgInfo("Site %s found no new items", fn)
     except ConfigParser.Error as err:
         lgError("ConfigParser Error, please check your ini file")
     except requests.exceptions.RequestException as err:
@@ -599,11 +617,16 @@ def fetch_site(ini_file):
 
 def fetch_all_site():
     """遍历INI_PATH，抓取其中所有站点"""
+    global PAGE_COUNT
+    PAGE_COUNT = 0
+    site_count = 0
     for fn in glob.glob("%s/*.ini" % INI_PATH):
         if os.path.split(fn)[-1].startswith("!"):
             continue
         else:
+            site_count += 1
             fetch_site(fn)
+    lgInfo("%s sites fretched, %s new pages found", site_count, PAGE_COUNT)
 
 
 def public():
@@ -620,24 +643,48 @@ def public():
 
 def main():
     """程序入口"""
+
+    global DEBUG_MODE
+
+    # 命令行参数
     argp = argparse.ArgumentParser(description="A local Page to RSS generator")
     argp.add_argument(
         "-t", "--test", nargs="?", const="*", help="test site(s)")
-    argp.add_argument("--conf", nargs=1, help="specify a global config file")
+    argp.add_argument("-c", "--conf", nargs=1, help="specify a global config file")
+    argp.add_argument("-l", "--loglevel", nargs=1, help="specify a log level")
+    argp.add_argument("-f", "--logfile", nargs=1, help="write log to file")
     args = argp.parse_args()
     lgDebug("Arguments: %s", args)
 
+    logger = logging.getLogger()
+
+    if not args.loglevel:
+        numeric_level = logging.INFO
+    else:
+        loglevel = args.loglevel[0]
+        numeric_level = getattr(logging, loglevel.upper(), None)
+        if not isinstance(numeric_level, int):
+            raise ValueError('Invalid log level: %s' % loglevel)
+    logger.setLevel(numeric_level)
+
+    try:
+        logfile = args.logfile[0]
+        loghandler = logging.FileHandler(logfile)
+        logger.addHandler(loghandler)
+    except Exception:
+        pass
+
     try:
         conf = args.conf[0]
-        lgDebug("conf = %s", conf)
     except Exception:
         conf = None
-
     read_config(conf)
+
     default_ini()
     print_config()
 
     if args.test:
+        DEBUG_MODE = True
         lgInfo("Running test: %s", args.test)
         if args.test == "*":
             fetch_all_site()
@@ -645,11 +692,17 @@ def main():
             fn = args.test
             fetch_site(fn)
     else:
+        DEBUG_MODE = False
         while True:
             lgInfo("Start fretch all site")
             fetch_all_site()
-            if REPO_NAME:
+            if REPO_NAME and PAGE_COUNT > 0:
                 public()
+            elif REPO_NAME:
+                lgInfo("No new link found, no need to public")
+            else:
+                pass
+
             lgInfo("Fetch done, wait %ss", FETCH_INTERVAL)
             time.sleep(FETCH_INTERVAL)
 
