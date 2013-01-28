@@ -13,7 +13,6 @@
 下载项目后，按以下格式建立文件夹
 
     ALIRSS
-    ├─debug     放置debug结果
     ├─export    放置输出的rss文件
     ├─ini       放置抓取页面的定义文件
     ├─src       程序
