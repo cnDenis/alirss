@@ -603,7 +603,7 @@ def fetch_site(ini_file):
             lgInfo("Site %s found %s new items", fn, npc)
             site.write_xml()
         else:
-            lgInfo("Site %s found no new items", fn)
+            lgDebug("Site %s found no new items", fn)
     except ConfigParser.Error as err:
         lgError("ConfigParser Error, please check your ini file")
     except requests.exceptions.RequestException as err:

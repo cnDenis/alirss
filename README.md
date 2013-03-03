@@ -15,27 +15,26 @@
     ALIRSS
     ├─export    放置输出的rss文件
     ├─ini       放置抓取页面的定义文件
-    ├─src       程序
-    └─test      测试文件（未完成，不用管）
+    └─src       程序
 
 在ini文件夹中放置需要抓页面的定义文件，示例如下：
 
     [SITE]
-    url = http://bbs.sysu.edu.cn        # 需要抓取的网址
-    title = 逸仙十大                    # RSS标题
-    description = 
-    charset = 
-    login = False                       # 是否需要登录
-    linkin = True                       # 是否跟踪链接
+    url=http://lsstudent.sysu.edu.cn/Home/Notice                # 需要抓取的网址
+    title=生科院学生网通知                                      # RSS标题
+    description=
+    login = False                                               # 是否需要登录
+    linkin = True                                               # 是否跟踪链接
 
     [RULE]
-    item = //div[@id="topten"]/ul/li    # RSS条目的xpath（只要能区分出不同条目就可以了）
-    item_link = .//a                    # RSS条目的链接的xpath （以item为当前节点开始查找）
-    item_title = .//a                   # RSS条目的标题的xpath （以item为当前节点开始查找）
+    item=//div[@class="articlelistdiv"]//a[@target="_blank"]    # RSS条目的xpath（只要能区分出不同条目就可以了）
+    item_link=                                                  # RSS条目的链接的xpath （以item为当前节点开始查找）
+    item_title=                                                 # RSS条目的标题的xpath （以item为当前节点开始查找）
+
 
     [LINKIN]
-    content = //table[1]//tr[3]         # 跟踪链接得到的页面所需提取的内容
-    charset = 
+    content=//div[@class="detailTail"]                          # 跟踪链接得到的页面所需提取的内容
+
 
     [LOGIN]
     url = http://www.example.com/login
